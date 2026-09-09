@@ -1,0 +1,54 @@
+### OS / editor
+*.log
+.DS_Store
+Thumbs.db
+/.idea
+/.vscode
+/.zed
+/.nova
+
+### PHP / IDE helpers
+.phpactor.json
+.phpunit.result.cache
+/.phpunit.cache
+_ide_helper.php
+
+### Environment & secrets
+.env
+.env.backup
+.env.production
+
+### Dependencies (install from lockfile)
+/vendor
+/node_modules
+
+### Build output
+/public/build
+/public/fonts-manifest.dev.json
+/public/hot
+/public/storage
+
+### Laravel runtime
+/storage/*.key
+/storage/pail
+/bootstrap/cache/packages.php
+/bootstrap/cache/services.php
+
+### Auth
+/auth.json
+Homestead.json
+Homestead.yaml
+
+### AI tool configs (local to each dev)
+/.agents/
+/.claude/
+/.cursor/
+/.codex/
+/.mcp.json
+/boost.json
+/AGENTS.md
+/CLAUDE.md
+/VERIFICATION.md
+
+### Progress tracker (not source code)
+/progress.md

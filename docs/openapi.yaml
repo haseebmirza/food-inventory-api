@@ -1,0 +1,757 @@
+openapi: 3.0.3
+info:
+  title: Daily Food Inventory API
+  description: |
+    Production-grade food inventory management REST API.
+
+    ## Authentication
+    All endpoints except register and login require a Bearer token via `Authorization: Bearer <token>`.
+    Tokens expire after 24 hours (configurable via `SANCTUM_EXPIRATION`).
+
+    ## Rate Limiting
+    - **Auth endpoints:** 20 req/min by IP + 5 req/min per email.
+    - **API endpoints:** 120 req/min per authenticated user.
+    - Rate limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`.
+
+    ## Idempotency
+    Movement creation requires a UUID `Idempotency-Key` header. Replaying the same key returns the original movement (200); reusing a key with different content returns 409.
+
+    ## Quantities
+    All quantity values are JSON **strings** with up to 3 decimal places (e.g. `"12.500"`). Different units are never summed together.
+
+    ## Sparse Fieldsets
+    Add `?fields=id,name,unit` to list endpoints to receive only the columns you need. The `id` field is always included. On `/inventory/history`, use `?include=item,day` to control which relations are eager-loaded (defaults to both).
+
+    ## Error Format
+    All errors return `{"message": "...", "errors": {...}}` with the appropriate HTTP status code.
+  version: 1.0.0
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Registration, login, logout, and profile
+  - name: Food Items
+    description: CRUD operations for food items
+  - name: Inventory
+    description: Inventory day management, movements, history, and reports
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation]
+              properties:
+                name:
+                  type: string
+                  maxLength: 120
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  minLength: 12
+                  maxLength: 72
+                  description: Must contain letters and numbers.
+                password_confirmation:
+                  type: string
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  maxLength: 72
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Invalid credentials
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (revoke current token)
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user profile
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /items:
+    get:
+      tags: [Food Items]
+      summary: List food items (paginated)
+      parameters:
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Fields'
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FoodItem'
+                  links:
+                    $ref: '#/components/schemas/PaginationLinks'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    post:
+      tags: [Food Items]
+      summary: Create a food item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodItemInput'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/FoodItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /items/{item}:
+    parameters:
+      - name: item
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      tags: [Food Items]
+      summary: Show a food item
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/FoodItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    put:
+      tags: [Food Items]
+      summary: Update a food item
+      description: Unit cannot change after inventory movements have been recorded (returns 409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodItemInput'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/FoodItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    delete:
+      tags: [Food Items]
+      summary: Deactivate a food item
+      description: Soft-deactivates by setting `active` to false.
+      responses:
+        '204':
+          description: Deactivated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /inventory-days:
+    post:
+      tags: [Inventory]
+      summary: Open an inventory day
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date:
+                  type: string
+                  format: date
+                  example: '2026-09-09'
+                openings:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [item_id, quantity]
+                    properties:
+                      item_id:
+                        type: integer
+                        minimum: 1
+                      quantity:
+                        type: string
+                        pattern: '^(0|[1-9][0-9]{0,8})(\.[0-9]{1,3})?$'
+      responses:
+        '201':
+          description: Day opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /inventory-days/{date}/movements:
+    parameters:
+      - name: date
+        in: path
+        required: true
+        schema:
+          type: string
+          format: date
+    post:
+      tags: [Inventory]
+      summary: Record an inventory movement
+      description: Idempotent via the `Idempotency-Key` header.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_id, type, quantity]
+              properties:
+                item_id:
+                  type: integer
+                  minimum: 1
+                type:
+                  type: string
+                  enum: [opening, in, out, waste, adjustment]
+                quantity:
+                  type: string
+                  pattern: '^-?(0|[1-9][0-9]{0,8})(\.[0-9]{1,3})?$'
+                note:
+                  type: string
+                  maxLength: 500
+                  description: Required when type is `adjustment`.
+      responses:
+        '201':
+          description: Movement created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Movement'
+        '200':
+          description: Idempotent replay (movement already existed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Movement'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /inventory-days/{date}/close:
+    parameters:
+      - name: date
+        in: path
+        required: true
+        schema:
+          type: string
+          format: date
+    post:
+      tags: [Inventory]
+      summary: Close an inventory day
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date:
+                  type: string
+                  format: date
+      responses:
+        '200':
+          description: Day closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /inventory/history:
+    get:
+      tags: [Inventory]
+      summary: Movement history (paginated)
+      parameters:
+        - name: item_id
+          in: query
+          schema:
+            type: integer
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [opening, in, out, waste, adjustment]
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Fields'
+        - $ref: '#/components/parameters/Include'
+      responses:
+        '200':
+          description: Paginated movements
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Movement'
+                  links:
+                    $ref: '#/components/schemas/PaginationLinks'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /inventory/daily-summary:
+    get:
+      tags: [Inventory]
+      summary: Daily inventory summary
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Summary for the given date
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      date:
+                        type: string
+                        format: date
+                      closed_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      items:
+                        type: array
+                        items:
+                          type: object
+                      totals_by_unit:
+                        type: object
+                        additionalProperties:
+                          type: object
+                          properties:
+                            opening_stock:
+                              type: string
+                            total_incoming:
+                              type: string
+                            total_outgoing:
+                              type: string
+                            total_waste:
+                              type: string
+                            total_adjustments:
+                              type: string
+                            closing_stock:
+                              type: string
+                      low_stock_items:
+                        type: array
+                        items:
+                          type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Sanctum token from login/register
+
+  parameters:
+    PerPage:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+    Fields:
+      name: fields
+      in: query
+      description: Comma-separated list of fields to return (e.g. `id,name,unit`). Omit for all fields. `id` is always included.
+      schema:
+        type: string
+        example: id,name,unit
+    Include:
+      name: include
+      in: query
+      description: Comma-separated relations to eager-load (e.g. `item,day`). Defaults to all when omitted.
+      schema:
+        type: string
+        example: item,day
+
+  responses:
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the limit resets
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: State conflict (duplicate, closed day, unit change, etc.)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+
+    TokenResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            token:
+              type: string
+            token_type:
+              type: string
+              example: Bearer
+            expires_at:
+              type: string
+              format: date-time
+
+    FoodItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        unit:
+          type: string
+          enum: [piece, kg, liter, portion]
+        minimum_stock:
+          type: string
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    FoodItemInput:
+      type: object
+      required: [name, unit, minimum_stock]
+      properties:
+        name:
+          type: string
+          maxLength: 120
+        unit:
+          type: string
+          enum: [piece, kg, liter, portion]
+        minimum_stock:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,8})(\.[0-9]{1,3})?$'
+        active:
+          type: boolean
+
+    Movement:
+      type: object
+      properties:
+        id:
+          type: integer
+        item_id:
+          type: integer
+        item:
+          $ref: '#/components/schemas/FoodItem'
+        date:
+          type: string
+          format: date
+        type:
+          type: string
+          enum: [opening, in, out, waste, adjustment]
+        quantity:
+          type: string
+        note:
+          type: string
+          nullable: true
+        created_by:
+          type: string
+          nullable: true
+        idempotency_key:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DayResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            date:
+              type: string
+              format: date
+            closed_at:
+              type: string
+              format: date-time
+              nullable: true
+
+    PaginationLinks:
+      type: object
+      properties:
+        first:
+          type: string
+        last:
+          type: string
+        prev:
+          type: string
+          nullable: true
+        next:
+          type: string
+          nullable: true
+
+    PaginationMeta:
+      type: object
+      properties:
+        current_page:
+          type: integer
+        last_page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+    SecurityHeaders:
+      description: |
+        All responses include the following security headers:
+        - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+        - `X-Content-Type-Options: nosniff`
+        - `X-Frame-Options: DENY`
+        - `Referrer-Policy: strict-origin-when-cross-origin`
+        - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
